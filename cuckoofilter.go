@@ -1,9 +1,10 @@
 package cuckoo
 
 import (
+	"bufio"
 	"fmt"
 	"math/bits"
-	"math/rand"
+	"os"
 )
 
 const maxCuckooCount = 500
@@ -13,22 +14,30 @@ type Filter struct {
 	buckets   []bucket
 	count     uint
 	bucketPow uint
+	FilePath  string
+	gen       LCG
 }
 
 // NewFilter returns a new cuckoofilter with a given capacity.
 // A capacity of 1000000 is a normal default, which allocates
 // about ~1MB on 64-bit machines.
-func NewFilter(capacity uint) *Filter {
-	capacity = getNextPow2(uint64(capacity)) / bucketSize
-	if capacity == 0 {
-		capacity = 1
+func NewFilter(capacity uint, path string) *Filter {
+	cf, err := ReadFile(path)
+	if err != nil {
+		capacity = getNextPow2(uint64(capacity)) / bucketSize
+		if capacity == 0 {
+			capacity = 1
+		}
+		buckets := make([]bucket, capacity)
+		cf = &Filter{
+			buckets:   buckets,
+			count:     0,
+			bucketPow: uint(bits.TrailingZeros(capacity)),
+			FilePath:  path,
+		}
 	}
-	buckets := make([]bucket, capacity)
-	return &Filter{
-		buckets:   buckets,
-		count:     0,
-		bucketPow: uint(bits.TrailingZeros(capacity)),
-	}
+
+	return cf
 }
 
 // Lookup returns true if data is in the counter
@@ -38,6 +47,15 @@ func (cf *Filter) Lookup(data []byte) bool {
 	return b1.getFingerprintIndex(fp) > -1 || b2.getFingerprintIndex(fp) > -1
 }
 
+// Expand expands the buckets when it was fulfilled
+func (cf *Filter) Expand() {
+	capacity := uint(1) << (uint(cf.bucketPow + 1))
+	buckets := make([]bucket, capacity)
+	copy(buckets, cf.buckets)
+	cf.buckets = buckets
+	cf.bucketPow = uint(bits.TrailingZeros(capacity))
+}
+
 func (cf *Filter) Reset() {
 	for i := range cf.buckets {
 		cf.buckets[i].reset()
@@ -45,8 +63,8 @@ func (cf *Filter) Reset() {
 	cf.count = 0
 }
 
-func randi(i1, i2 uint) uint {
-	if rand.Intn(2) == 0 {
+func (cf *Filter) randi(i1, i2 uint) uint {
+	if cf.gen.Intn(2) == 0 {
 		return i1
 	}
 	return i2
@@ -58,7 +76,7 @@ func (cf *Filter) Insert(data []byte) bool {
 	if cf.insert(fp, i1) || cf.insert(fp, i2) {
 		return true
 	}
-	return cf.reinsert(fp, randi(i1, i2))
+	return cf.reinsert(fp, cf.randi(i1, i2))
 }
 
 // InsertUnique inserts data into the counter if not exists and returns true upon success
@@ -78,8 +96,10 @@ func (cf *Filter) insert(fp byte, i uint) bool {
 }
 
 func (cf *Filter) reinsert(fp byte, i uint) bool {
+	count := 0
+reinsert:
 	for k := 0; k < maxCuckooCount; k++ {
-		j := rand.Intn(bucketSize)
+		j := cf.gen.Intn(bucketSize)
 		oldfp := fp
 		fp = cf.buckets[i][j]
 		cf.buckets[i][j] = oldfp
@@ -89,6 +109,11 @@ func (cf *Filter) reinsert(fp byte, i uint) bool {
 		if cf.insert(fp, i) {
 			return true
 		}
+	}
+	cf.Expand()
+	count++
+	if count < 3 {
+		goto reinsert
 	}
 	return false
 }
@@ -145,4 +170,68 @@ func Decode(bytes []byte) (*Filter, error) {
 		count:     count,
 		bucketPow: uint(bits.TrailingZeros(uint(len(buckets)))),
 	}, nil
+}
+
+func (cf *Filter) SaveFile() error {
+	file, err := os.Create(cf.FilePath)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(cf.Encode())
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return nil
+}
+func ReadFile(path string) (*Filter, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	stats, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	var size int64 = stats.Size()
+	bytes := make([]byte, size)
+
+	bufr := bufio.NewReader(file)
+	_, err = bufr.Read(bytes)
+	if err != nil {
+		return nil, err
+	}
+	cf, err := Decode(bytes)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return cf, nil
+}
+
+func (cf *Filter) ReadFile() error {
+	file, err := os.Open(cf.FilePath)
+	if err != nil {
+		return err
+	}
+	stats, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	var size int64 = stats.Size()
+	bytes := make([]byte, size)
+
+	bufr := bufio.NewReader(file)
+	_, err = bufr.Read(bytes)
+	if err != nil {
+		return err
+	}
+	cf, err = Decode(bytes)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return nil
 }

@@ -1,6 +1,10 @@
 package cuckoo
 
 import (
+	"bytes"
+	"encoding/binary"
+	"sync/atomic"
+
 	metro "github.com/dgryski/go-metro"
 )
 
@@ -50,4 +54,41 @@ func getNextPow2(n uint64) uint {
 	n |= n >> 32
 	n++
 	return uint(n)
+}
+
+const a = uint64(2862933555777941757)
+const b = uint64(3037000493)
+
+// Linear Congruential Generator
+// See https://link.springer.com/chapter/10.1007/978-1-4615-2317-8_3
+type LCG struct {
+	state uint64
+}
+
+func (l *LCG) Intn(n int) int {
+	for {
+		state := atomic.LoadUint64(&l.state)
+
+		newState := a*state + b
+
+		// Replace only if the state is still the same
+		swapped := atomic.CompareAndSwapUint64(&l.state, state, newState)
+		if swapped {
+			return int(newState % uint64(n))
+		}
+	}
+}
+
+func UintIn(n uint) []byte {
+	data := uint64(n)
+	bytebuf := bytes.NewBuffer([]byte{})
+	binary.Write(bytebuf, binary.BigEndian, data)
+	return bytebuf.Bytes()
+}
+
+func UintOut(bye []byte) uint {
+	bytebuff := bytes.NewBuffer(bye)
+	var data uint64
+	binary.Read(bytebuff, binary.BigEndian, &data)
+	return uint(data)
 }
